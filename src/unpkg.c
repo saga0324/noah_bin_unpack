@@ -1,10 +1,50 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 #include <sys/mman.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
+#include <unistd.h>
+
+#define PKG_HEADER_SIZE 2048
+#define NUM_ITEMS 31
+
+static uint32_t crc32_table[256];
+
+void generate_crc32_table()
+{
+    uint32_t polynomial = 0xEDB88320;
+    for (uint32_t i = 0; i < 256; i++)
+    {
+        uint32_t crc = i;
+        for (uint8_t j = 0; j < 8; j++)
+        {
+            if (crc & 1)
+            {
+                crc = (crc >> 1) ^ polynomial;
+            }
+            else
+            {
+                crc >>= 1;
+            }
+        }
+        crc32_table[i] = crc;
+    }
+}
+
+uint32_t calculate_crc32(const uint8_t *data, size_t len)
+{
+    uint32_t crc = 0xFFFFFFFF;
+    for (size_t i = 0; i < len; i++)
+    {
+        uint8_t byte = data[i];
+        uint32_t lookup_idx = (crc ^ byte) & 0xFF;
+        crc = (crc >> 8) ^ crc32_table[lookup_idx];
+    }
+    return ~crc;
+}
 
 struct
 {
@@ -24,20 +64,20 @@ struct
 };
 
 struct
-{                           // length 2048 0x800u
-    int64_t tag;            // length 8
-    int32_t ver;            // length 4
-    char unset[64 - 8 - 4]; // length 52
+{
+    int64_t tag;
+    int32_t ver;
+    char unset[52];
     struct
-    {                      // length 64
-        uint32_t len;      // length 4
-        uint32_t offset;   // length 4
-        int32_t ver;       // length 4
-        int32_t fstype;    // length 4
-        uint32_t checksum; // length 4
-        char dev[12];      // length 12
-        char unset[32];    // length 32
-    } item[31];            // length 64 * 31 = 1984
+    {
+        uint32_t len;
+        uint32_t offset;
+        int32_t ver;
+        int32_t fstype;
+        uint32_t checksum;
+        char dev[12];
+        char unset[32];
+    } item[NUM_ITEMS];
 } pkg_file_header;
 
 int ora_buf(char *buffer, int size)
@@ -52,49 +92,54 @@ int ora_buf(char *buffer, int size)
 
 int main(int argc, const char **argv)
 {
-    int pkg_num = 0;
-    int idx = 0;
-    int32_t ver = 0;
-    int64_t tag = 0;
-
     if (argc <= 1)
     {
-        printf("\n Used : %s upgrade.bin \n", argv[0]);
-        exit(1);
+        printf("Noah Upgrade Binary Unpacker v1.1\n");
+        printf("Usage: %s <path/to/upgrade.bin>\n", argv[0]);
+        exit(EXIT_FAILURE);
     }
 
     FILE *upgrade_stream = fopen(argv[1], "rb");
     if (!upgrade_stream)
-        return -1;
-    fread(&pkg_file_header, 0x800u, 1u, upgrade_stream);
+    {
+        perror("[ERROR]File Read Error");
+        return EXIT_FAILURE;
+    }
+    fread(&pkg_file_header, PKG_HEADER_SIZE, 1, upgrade_stream);
     fclose(upgrade_stream);
 
-    ora_buf((void *)&pkg_file_header, 2048);
-
-    printf("\n tag = ");
-    fwrite((char *)&pkg_file_header.tag, 8, 1, stdout);
-    printf(" ");
-    printf("\n ver = %d ", pkg_file_header.ver);
-    printf("\n ");
+    ora_buf((char *)&pkg_file_header, PKG_HEADER_SIZE);
 
     int upgrade_fd = open(argv[1], O_RDONLY);
     struct stat statbuff;
-    fstat(upgrade_fd, &statbuff);
+    if (fstat(upgrade_fd, &statbuff) == -1)
+    {
+        perror("[ERROR]File Stat Error");
+        close(upgrade_fd);
+        return EXIT_FAILURE;
+    }
+
     void *upgrade_mmap = mmap(NULL, statbuff.st_size, PROT_READ, MAP_PRIVATE, upgrade_fd, 0);
     if (upgrade_mmap == MAP_FAILED)
     {
+        perror("[ERROR]File Map Error");
         close(upgrade_fd);
-        return -1;
+        return EXIT_FAILURE;
     }
 
-    for (int i = 0; i < 31; ++i)
+    generate_crc32_table();
+
+    for (int i = 0; i < NUM_ITEMS; ++i)
     {
         if (pkg_file_header.item[i].len)
         {
-            printf("\n pkg_item_len = %d ", pkg_file_header.item[i].len);
-            printf("\n offset = %d ", pkg_file_header.item[i].offset);
-            printf("\n ver = %d ", pkg_file_header.item[i].ver);
-            char *fstype = "unknow";
+            const uint8_t *data = (const uint8_t *)(upgrade_mmap + pkg_file_header.item[i].offset);
+            uint32_t crc = calculate_crc32(data, pkg_file_header.item[i].len);
+            pkg_file_header.item[i].checksum = crc;
+            printf("\npkg_item_len = %d ", pkg_file_header.item[i].len);
+            printf("\noffset = %d ", pkg_file_header.item[i].offset);
+            printf("\nver = %d ", pkg_file_header.item[i].ver);
+            char *fstype = "Unknown";
             for (int ii = 0; pkg_fstype_tbl[ii].name; ++ii)
             {
                 if (pkg_fstype_tbl[ii].id == pkg_file_header.item[i].fstype)
@@ -103,11 +148,10 @@ int main(int argc, const char **argv)
                     break;
                 }
             }
-            printf("\n fstype = %s ", fstype);
-            printf("\n checksum = 0x%08X ", pkg_file_header.item[i].checksum);
-            printf("\n dev = ");
+            printf("\nfstype = %s ", fstype);
+            printf("\nchecksum = 0x%08X ", pkg_file_header.item[i].checksum);
+            printf("\ndev = ");
             fwrite(pkg_file_header.item[i].dev, 12, 1, stdout);
-            printf(" ");
 
             char output_name[1024] = {0};
             if (pkg_file_header.item[i].dev[0] >= '0' && pkg_file_header.item[i].dev[0] <= '9')
@@ -130,7 +174,7 @@ int main(int argc, const char **argv)
                 char *dev_filename = strrchr(pkg_file_header.item[i].dev, '/');
                 if (dev_filename)
                 {
-                    dev_filename ++ ;
+                    dev_filename++;
                     if (!strcmp(dev_filename, "mtd3"))
                         dev_filename = "rootfs";
                     else if (!strcmp(dev_filename, "mtd4"))
@@ -153,13 +197,13 @@ int main(int argc, const char **argv)
                         dev_filename = "DataFS";
                     else if (!strcmp(dev_filename, "ubi0_6"))
                         dev_filename = "UsrDisk";
-                    sprintf(output_name, "%s.%s", dev_filename , fstype);
+                    sprintf(output_name, "%s.%s", dev_filename, fstype);
                 }
             }
             if (output_name[0] == '\0')
                 sprintf(output_name, "idx-%d-file.bin", i);
-            printf("\n file = %s ", output_name);
-            printf("\n ");
+            printf("\nfile = %s ", output_name);
+            printf("\n");
 
             FILE *s = fopen(output_name, "wb");
             fwrite(upgrade_mmap + pkg_file_header.item[i].offset, pkg_file_header.item[i].len, 1, s);
@@ -170,5 +214,5 @@ int main(int argc, const char **argv)
     munmap(upgrade_mmap, statbuff.st_size);
     close(upgrade_fd);
 
-    return 0;
+    return EXIT_SUCCESS;
 }
