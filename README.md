@@ -8,8 +8,4 @@
 
 ## Usage
 
-	./src/unpkg upgrade.bin
-
-## TODO
-
-CRC32校验支持。
+	./src/unpkg <path/to/upgrade.bin>
