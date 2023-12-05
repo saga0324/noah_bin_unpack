@@ -94,10 +94,15 @@ int main(int argc, const char **argv)
 {
     if (argc <= 1)
     {
-        printf("Noah Upgrade Binary Unpacker v1.1\n");
-        printf("Usage: %s <path/to/upgrade.bin>\n", argv[0]);
+        printf("Noah Upgrade Binary Unpacker v1.2\n");
+        printf("Usage: %s <path/to/upgrade.bin> <output_directory>\n", argv[0]);
         exit(EXIT_FAILURE);
     }
+
+    char output_directory[1024];
+    char output_path[2048];
+    strncpy(output_directory, argv[2], sizeof(output_directory));
+    output_directory[sizeof(output_directory) - 1] = '\0';
 
     FILE *upgrade_stream = fopen(argv[1], "rb");
     if (!upgrade_stream)
@@ -125,6 +130,12 @@ int main(int argc, const char **argv)
         perror("[ERROR]File Map Error");
         close(upgrade_fd);
         return EXIT_FAILURE;
+    }
+
+    struct stat st = {0};
+    if (stat(output_directory, &st) == -1)
+    {
+        mkdir(output_directory, 0700);
     }
 
     generate_crc32_table();
@@ -205,7 +216,10 @@ int main(int argc, const char **argv)
             printf("\nfile = %s ", output_name);
             printf("\n");
 
-            FILE *s = fopen(output_name, "wb");
+            char output_path[1024];
+            snprintf(output_path, sizeof(output_path), "%s/%s", output_directory, output_name);
+
+            FILE *s = fopen(output_path, "wb");
             fwrite(upgrade_mmap + pkg_file_header.item[i].offset, pkg_file_header.item[i].len, 1, s);
             fclose(s);
         }

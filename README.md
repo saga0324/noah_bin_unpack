@@ -8,4 +8,4 @@
 
 ## Usage
 
-	./src/unpkg <path/to/upgrade.bin>
+	./src/unpkg <path/to/upgrade.bin> <output_directory>
