@@ -10,6 +10,10 @@
 
 #define PKG_HEADER_SIZE 2048
 #define NUM_ITEMS 31
+#define OUTPUT_DIR_SIZE 1024
+#define OUTPUT_PATH_SIZE 2048
+#define DEV_NAME_SIZE 12
+#define FSTYPE_NAME_SIZE 13
 
 static uint32_t crc32_table[256];
 
@@ -21,14 +25,7 @@ void generate_crc32_table()
         uint32_t crc = i;
         for (uint8_t j = 0; j < 8; j++)
         {
-            if (crc & 1)
-            {
-                crc = (crc >> 1) ^ polynomial;
-            }
-            else
-            {
-                crc >>= 1;
-            }
+            crc = (crc & 1) ? (crc >> 1) ^ polynomial : crc >> 1;
         }
         crc32_table[i] = crc;
     }
@@ -39,87 +36,80 @@ uint32_t calculate_crc32(const uint8_t *data, size_t len)
     uint32_t crc = 0xFFFFFFFF;
     for (size_t i = 0; i < len; i++)
     {
-        uint8_t byte = data[i];
-        uint32_t lookup_idx = (crc ^ byte) & 0xFF;
-        crc = (crc >> 8) ^ crc32_table[lookup_idx];
+        crc = (crc >> 8) ^ crc32_table[(crc ^ data[i]) & 0xFF];
     }
     return ~crc;
 }
 
-struct
+typedef struct
 {
     char *name;
     int32_t id;
-} pkg_fstype_tbl[] = {
-    {"none", 0},
-    {"fat", 1},
-    {"yaffs", 2},
-    {"yaffs2", 3},
-    {"ext2", 4},
-    {"ram", 5},
-    {"raw", 6},
-    {"nor", 7},
-    {"ubifs", 8},
-    {NULL, 0},
-};
+} PkgFSType;
 
-struct
+static PkgFSType pkg_fstype_tbl[] = {
+    {"none", 0}, {"fat", 1}, {"yaffs", 2}, {"yaffs2", 3}, {"ext2", 4}, {"ram", 5}, {"raw", 6}, {"nor", 7}, {"ubifs", 8}, {NULL, 0}};
+
+typedef struct
+{
+    uint32_t len;
+    uint32_t offset;
+    int32_t ver;
+    int32_t fstype;
+    uint32_t checksum;
+    char dev[DEV_NAME_SIZE];
+    char unset[32];
+} PkgItem;
+
+typedef struct
 {
     int64_t tag;
     int32_t ver;
     char unset[52];
-    struct
-    {
-        uint32_t len;
-        uint32_t offset;
-        int32_t ver;
-        int32_t fstype;
-        uint32_t checksum;
-        char dev[12];
-        char unset[32];
-    } item[NUM_ITEMS];
-} pkg_file_header;
+    PkgItem item[NUM_ITEMS];
+} PkgFileHeader;
+
+PkgFileHeader pkg_file_header;
 
 int ora_buf(char *buffer, int size)
 {
-    int i;
-    for (i = 0; i < size; ++i)
+    for (int i = 0; i < size; ++i)
     {
         buffer[i] = ((buffer[i] & 0x55) << 1) | ((buffer[i] & 0xAA) >> 1);
     }
-    return i;
+    return size;
 }
 
-int main(int argc, const char **argv)
+int process_file(const char *input_path, const char *output_directory)
 {
-    if (argc <= 1)
-    {
-        printf("Noah Upgrade Binary Unpacker v1.2\n");
-        printf("Usage: %s <path/to/upgrade.bin> <output_directory>\n", argv[0]);
-        exit(EXIT_FAILURE);
-    }
-
-    char output_directory[1024];
-    char output_path[2048];
-    strncpy(output_directory, argv[2], sizeof(output_directory));
-    output_directory[sizeof(output_directory) - 1] = '\0';
-
-    FILE *upgrade_stream = fopen(argv[1], "rb");
+    FILE *upgrade_stream = fopen(input_path, "rb");
     if (!upgrade_stream)
     {
-        perror("[ERROR]File Read Error");
+        perror("[ERROR] File Read Error");
         return EXIT_FAILURE;
     }
-    fread(&pkg_file_header, PKG_HEADER_SIZE, 1, upgrade_stream);
+
+    if (fread(&pkg_file_header, PKG_HEADER_SIZE, 1, upgrade_stream) != 1)
+    {
+        perror("[ERROR] Header Read Error");
+        fclose(upgrade_stream);
+        return EXIT_FAILURE;
+    }
     fclose(upgrade_stream);
 
     ora_buf((char *)&pkg_file_header, PKG_HEADER_SIZE);
 
-    int upgrade_fd = open(argv[1], O_RDONLY);
+    int upgrade_fd = open(input_path, O_RDONLY);
+    if (upgrade_fd == -1)
+    {
+        perror("[ERROR] File Open Error");
+        return EXIT_FAILURE;
+    }
+
     struct stat statbuff;
     if (fstat(upgrade_fd, &statbuff) == -1)
     {
-        perror("[ERROR]File Stat Error");
+        perror("[ERROR] File Stat Error");
         close(upgrade_fd);
         return EXIT_FAILURE;
     }
@@ -127,15 +117,9 @@ int main(int argc, const char **argv)
     void *upgrade_mmap = mmap(NULL, statbuff.st_size, PROT_READ, MAP_PRIVATE, upgrade_fd, 0);
     if (upgrade_mmap == MAP_FAILED)
     {
-        perror("[ERROR]File Map Error");
+        perror("[ERROR] File Mapping Error");
         close(upgrade_fd);
         return EXIT_FAILURE;
-    }
-
-    struct stat st = {0};
-    if (stat(output_directory, &st) == -1)
-    {
-        mkdir(output_directory, 0700);
     }
 
     generate_crc32_table();
@@ -227,6 +211,31 @@ int main(int argc, const char **argv)
 
     munmap(upgrade_mmap, statbuff.st_size);
     close(upgrade_fd);
-
     return EXIT_SUCCESS;
+}
+
+int main(int argc, const char **argv)
+{
+    if (argc <= 2)
+    {
+        printf("Noah Upgrade Binary Unpacker v1.3\n");
+        printf("Usage: %s <path/to/upgrade.bin> <output_directory>\n", argv[0]);
+        return EXIT_FAILURE;
+    }
+
+    char output_directory[OUTPUT_DIR_SIZE];
+    strncpy(output_directory, argv[2], OUTPUT_DIR_SIZE - 1);
+    output_directory[OUTPUT_DIR_SIZE - 1] = '\0';
+
+    struct stat st;
+    if (stat(output_directory, &st) == -1)
+    {
+        if (mkdir(output_directory, 0700) == -1)
+        {
+            perror("[ERROR] Directory Creation Error");
+            return EXIT_FAILURE;
+        }
+    }
+
+    return process_file(argv[1], output_directory);
 }
